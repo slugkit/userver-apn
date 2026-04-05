@@ -280,26 +280,36 @@ Client
 ├── Impl
 │   ├── http_client_       → userver HttpClient (from component context)
 │   ├── credentials_       → default Credentials (from config / env vars)
-│   ├── signer_            → crypto::SignerEs256 (from default credentials)
-│   ├── token_             → current JWT for default credentials (mutex-protected)
-│   ├── token_issued_at_   → timestamp of last token generation
-│   └── token_refresh_interval_ → from config (default: 50 min)
+│   ├── base_url_          → sandbox or production endpoint
+│   ├── request_timeout_   → configurable (default: 10s)
+│   ├── token_refresh_interval_ → configurable (default: 50 min)
+│   ├── token              → rcu::Variable<string> (lock-free reads)
+│   └── refresh_task       → PeriodicTask (background JWT refresh)
 │
-├── Send(notification)                        → uses default credentials + cached JWT
-│   ├── EnsureToken()                         → refresh JWT if stale
+├── Send(notification)                        → reads cached JWT via RCU
+│   ├── token.Read()
 │   ├── Build HTTP/2 request
 │   └── Parse response
 │
-├── Send(credentials, notification)           → uses provided credentials, fresh JWT
-│   ├── GenerateToken(credentials)            → always creates a new JWT
+├── Send(credentials, notification)           → fresh JWT per call
+│   ├── GenerateToken(credentials)
 │   ├── Build HTTP/2 request
 │   └── Parse response
 │
-└── EnsureToken()
-    ├── Check age of current token
-    ├── If fresh → return current
-    └── If stale → sign new JWT with ES256, store it
+└── RefreshToken()                            → called by PeriodicTask
+    ├── Sign new JWT with ES256
+    ├── token.Assign(new_jwt)
+    └── Reschedule refresh_task
 ```
+
+**Token management:**
+
+- The JWT is stored in an `rcu::Variable<std::string>` for lock-free reads
+  from concurrent `Send()` calls.
+- A `PeriodicTask` runs `RefreshToken()` at the configured interval
+  (default 50 minutes, must be less than Apple's 60-minute limit).
+- The initial JWT is generated synchronously in the constructor. If the key
+  is invalid, the component fails to start.
 
 **JWT generation** uses userver's built-in crypto:
 
