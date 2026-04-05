@@ -6,16 +6,15 @@
 #include <userver/clients/http/component.hpp>
 #include <userver/components/component_config.hpp>
 #include <userver/components/component_context.hpp>
+#include <userver/crypto/signers.hpp>
 #include <userver/formats/json/serialize.hpp>
 #include <userver/formats/json/value.hpp>
 #include <userver/http/http_version.hpp>
-#include <userver/crypto/signers.hpp>
 #include <userver/http/predefined_header.hpp>
 #include <userver/logging/log.hpp>
+#include <userver/rcu/rcu.hpp>
+#include <userver/utils/periodic_task.hpp>
 #include <userver/yaml_config/merge_schemas.hpp>
-
-#include <chrono>
-#include <mutex>
 
 namespace apn {
 
@@ -106,9 +105,8 @@ struct Client::Impl {
     std::chrono::milliseconds request_timeout;
     std::chrono::seconds token_refresh_interval;
 
-    mutable std::mutex token_mutex;
-    mutable std::string token;
-    mutable std::chrono::system_clock::time_point token_issued_at;
+    userver::rcu::Variable<std::string> token;
+    userver::utils::PeriodicTask refresh_task;
 
     Impl(
         const userver::components::ComponentConfig& config,
@@ -130,31 +128,36 @@ struct Client::Impl {
         if (credentials.team_id.empty()) {
             throw std::runtime_error("apn-client: team-id is not configured (set APN_TEAM_ID)");
         }
-        // Validate that the PEM can be parsed into a signer
         try {
             userver::crypto::SignerEs256{credentials.key_pem};
         } catch (const std::exception& e) {
             throw std::runtime_error(fmt::format("apn-client: invalid key-pem: {}", e.what()));
         }
+
+        RefreshToken();
     }
 
-    auto EnsureToken() const -> std::string {
-        std::lock_guard lock{token_mutex};
-        auto now = userver::utils::datetime::Now();
-        if (token.empty() || (now - token_issued_at) >= token_refresh_interval) {
-            token = jwt::GenerateToken(credentials.key_pem, credentials.key_id, credentials.team_id);
-            token_issued_at = now;
-            LOG_INFO() << "APNs JWT refreshed";
-        }
-        return token;
+    ~Impl() { refresh_task.Stop(); }
+
+    void RefreshToken() {
+        auto new_token = jwt::GenerateToken(credentials.key_pem, credentials.key_id, credentials.team_id);
+        token.Assign(std::move(new_token));
+        LOG_INFO() << "APNs JWT refreshed, next refresh in " << token_refresh_interval.count() << "s";
+
+        refresh_task.Start(
+            "apn-token-refresh",
+            userver::utils::PeriodicTask::Settings{
+                std::chrono::duration_cast<std::chrono::milliseconds>(token_refresh_interval)},
+            [this] { RefreshToken(); }
+        );
     }
 
     auto Send(const Notification& notification) const -> SendResult {
-        auto bearer = EnsureToken();
+        auto current_token = token.Read();
         return DoSend(
             http_client.GetHttpClient(),
             base_url,
-            bearer,
+            *current_token,
             notification,
             credentials.topic,
             request_timeout
