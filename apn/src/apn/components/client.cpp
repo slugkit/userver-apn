@@ -119,9 +119,10 @@ struct Client::Impl {
         , token_refresh_interval(config["token-refresh-interval"].As<std::chrono::seconds>(
               kDefaultTokenRefreshInterval
           )) {
-        if (credentials.key_pem.empty()) {
-            throw std::runtime_error("apn-client: key-pem is not configured (set APN_KEY_PEM)");
-        }
+        // Resolve PEM (env var APN_KEY_PEM takes precedence over file APN_KEY_PEM_FILE).
+        // Store the resolved value back into credentials.key_pem so the rest of the
+        // component can keep using it directly.
+        credentials.key_pem = credentials.ResolvePem();
         if (credentials.key_id.empty()) {
             throw std::runtime_error("apn-client: key-id is not configured (set APN_KEY_ID)");
         }
@@ -194,7 +195,12 @@ additionalProperties: false
 properties:
     key-pem:
         type: string
-        description: PEM content of the .p8 auth key
+        description: PEM content of the .p8 auth key (takes precedence over key-pem-file)
+        defaultDescription: ""
+    key-pem-file:
+        type: string
+        description: Path to a file containing the PEM content (used if key-pem is empty)
+        defaultDescription: ""
     key-id:
         type: string
         description: 10-character Key ID from Apple Developer
