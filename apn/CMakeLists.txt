@@ -29,6 +29,7 @@ if(APN_BUILD_TESTS)
     add_executable(apn_unittest
         tests/jwt_test.cpp
         tests/notification_test.cpp
+        tests/credentials_test.cpp
     )
     target_link_libraries(apn_unittest PRIVATE apn_client userver::utest)
     target_include_directories(apn_unittest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

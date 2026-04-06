@@ -110,6 +110,8 @@ The component reads credentials from environment variables via userver's
 apn-client:
     key-pem: ""
     key-pem#env: APN_KEY_PEM
+    key-pem-file: ""
+    key-pem-file#env: APN_KEY_PEM_FILE
     key-id: ""
     key-id#env: APN_KEY_ID
     team-id: ""
@@ -120,6 +122,13 @@ apn-client:
     token-refresh-interval: 50m
     request-timeout: 10s
 ```
+
+The component accepts the PEM via either `key-pem` (inline content) or
+`key-pem-file` (path to a file). If both are set, **`key-pem` takes
+precedence**. This dual mode lets the same binary work in environments where
+secrets are exposed as env vars (e.g. fly.io: `fly secrets set APN_KEY_PEM=...`)
+and in environments where they are mounted as files (e.g. Docker Compose
+`secrets:`, Kubernetes secret volumes).
 
 And in `config_vars.yaml`:
 
@@ -137,28 +146,52 @@ component will fail at runtime with a clear error if credentials are missing).
 
 ## 8. Local Development
 
-For local development inside the devcontainer, create a `.env` file in the
-project root (already gitignored):
+Docker Compose `env_file:` does **not** support multiline values — it parses
+each line as a standalone `KEY=value`, so an inlined multiline PEM gets
+truncated at the first newline. For local development, use Docker Compose
+`secrets:` (file mounts) instead.
 
-```bash
-# .env — local development only, never commit this file
-APN_KEY_PEM="-----BEGIN PRIVATE KEY-----
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg...
------END PRIVATE KEY-----"
-APN_KEY_ID=ABC123DEFG
-APN_TEAM_ID=XYZ9876543
-APN_TOPIC=com.yourcompany.pokeme
-```
+### Recommended: Docker Compose secrets
 
-Then either `source .env` before running the service, or pass the env file to
-docker compose:
+`docker-compose.yaml`:
 
 ```yaml
-# docker-compose.yaml
 services:
   your-service:
     env_file:
-      - .env
+      - .env       # for non-secret vars: APN_KEY_ID, APN_TEAM_ID, APN_TOPIC
+    secrets:
+      - source: apn_key
+        uid: "1001"   # match the in-container user
+        gid: "1001"
+        mode: 0400
+
+secrets:
+  apn_key:
+    file: .secret-stuff/AuthKey_ABC123DEFG.p8
+```
+
+`.env` (gitignored):
+
+```bash
+APN_KEY_ID=ABC123DEFG
+APN_TEAM_ID=XYZ9876543
+APN_TOPIC=com.yourcompany.pokeme
+APN_KEY_PEM_FILE=/run/secrets/apn_key
+```
+
+Inside the container the `.p8` is mounted at `/run/secrets/apn_key` (read-only,
+owned by the service user). The component reads the file via `APN_KEY_PEM_FILE`.
+
+### Alternative: shell sourcing
+
+If you run the service directly outside Compose, `source` an env file in a
+shell (which does support multiline quoted values):
+
+```bash
+APN_KEY_PEM="$(cat AuthKey_ABC123DEFG.p8)"
+export APN_KEY_PEM APN_KEY_ID APN_TEAM_ID APN_TOPIC
+./your-service ...
 ```
 
 ## 9. Production Deployment
