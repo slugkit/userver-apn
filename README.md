@@ -347,7 +347,14 @@ apn-client:
     use-sandbox: $apn-use-sandbox             # true for dev, false for production
     token-refresh-interval: 50m               # must be < 60m
     request-timeout: 10s
+    # host-override: ""                       # testsuite only; replaces Apple host
 ```
+
+The optional `host-override` field takes a full base URL (scheme + host +
+port, no trailing slash) and replaces the Apple sandbox/production host
+entirely. It exists so integration tests can point the client at a
+mockserver; leave it empty in production.
+
 
 The `key-pem` property accepts the raw PEM content of the `.p8` file
 (including `-----BEGIN PRIVATE KEY-----` and `-----END PRIVATE KEY-----`

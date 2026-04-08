@@ -31,6 +31,13 @@ auto BaseUrl(bool use_sandbox) -> std::string_view {
     return use_sandbox ? kSandboxUrl : kProductionUrl;
 }
 
+auto ResolveBaseUrl(std::string_view host_override, bool use_sandbox) -> std::string {
+    if (!host_override.empty()) {
+        return std::string{host_override};
+    }
+    return std::string{BaseUrl(use_sandbox)};
+}
+
 auto DoSend(
     userver::clients::http::Client& http_client,
     std::string_view base_url,
@@ -101,6 +108,7 @@ auto DoSend(
 struct Client::Impl {
     userver::components::HttpClient& http_client;
     Credentials credentials;
+    std::string host_override;
     std::string base_url;
     std::chrono::milliseconds request_timeout;
     std::chrono::seconds token_refresh_interval;
@@ -114,7 +122,8 @@ struct Client::Impl {
     )
         : http_client(context.FindComponent<userver::components::HttpClient>())
         , credentials(Credentials::FromConfig(config))
-        , base_url(BaseUrl(credentials.use_sandbox))
+        , host_override(config["host-override"].As<std::string>(""))
+        , base_url(ResolveBaseUrl(host_override, credentials.use_sandbox))
         , request_timeout(config["request-timeout"].As<std::chrono::milliseconds>(kDefaultRequestTimeout))
         , token_refresh_interval(config["token-refresh-interval"].As<std::chrono::seconds>(
               kDefaultTokenRefreshInterval
@@ -169,7 +178,7 @@ struct Client::Impl {
         auto bearer = jwt::GenerateToken(creds.key_pem, creds.key_id, creds.team_id);
         return DoSend(
             http_client.GetHttpClient(),
-            BaseUrl(creds.use_sandbox),
+            ResolveBaseUrl(host_override, creds.use_sandbox),
             bearer,
             notification,
             creds.topic,
@@ -214,6 +223,10 @@ properties:
         type: boolean
         description: Use sandbox endpoint instead of production
         defaultDescription: false
+    host-override:
+        type: string
+        description: Full base URL (scheme + host + port) overriding the Apple endpoint. Intended for testsuite mockservers; leave empty in production.
+        defaultDescription: ""
     token-refresh-interval:
         type: string
         description: How often to refresh the JWT (must be < 60m)
