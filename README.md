@@ -353,7 +353,10 @@ apn-client:
 The optional `host-override` field takes a full base URL (scheme + host +
 port, no trailing slash) and replaces the Apple sandbox/production host
 entirely. It exists so integration tests can point the client at a
-mockserver; leave it empty in production.
+mockserver; leave it empty in production. When the override starts with
+`http://` (rather than `https://`) the client also downgrades to HTTP/1.1,
+since mockservers generally do not speak HTTP/2 — production traffic to
+Apple still goes over HTTP/2 + TLS as required.
 
 
 The `key-pem` property accepts the raw PEM content of the `.p8` file

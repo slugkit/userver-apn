@@ -38,6 +38,19 @@ auto ResolveBaseUrl(std::string_view host_override, bool use_sandbox) -> std::st
     return std::string{BaseUrl(use_sandbox)};
 }
 
+/// Pick the HTTP version based on the URL scheme. Production APNs
+/// requires HTTP/2 over TLS, so anything https:// gets k2Tls. A
+/// plain http:// URL is only ever used when a testsuite mockserver
+/// is on the other end (via ``host-override``) and those speak
+/// HTTP/1.1 — so downgrade automatically.
+auto HttpVersionFor(std::string_view base_url) -> userver::http::HttpVersion {
+    constexpr std::string_view kHttpsPrefix = "https://";
+    if (base_url.substr(0, kHttpsPrefix.size()) == kHttpsPrefix) {
+        return userver::http::HttpVersion::k2Tls;
+    }
+    return userver::http::HttpVersion::k11;
+}
+
 auto DoSend(
     userver::clients::http::Client& http_client,
     std::string_view base_url,
@@ -55,7 +68,7 @@ auto DoSend(
 
     auto request = http_client.CreateRequest()
                        .post(url, notification.payload)
-                       .http_version(userver::http::HttpVersion::k2Tls)
+                       .http_version(HttpVersionFor(base_url))
                        .headers({
                            {"authorization", fmt::format("bearer {}", bearer_token)},
                            {"apns-topic", topic},
