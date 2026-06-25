@@ -6,6 +6,8 @@
 #include <userver/clients/http/component.hpp>
 #include <userver/components/component_config.hpp>
 #include <userver/components/component_context.hpp>
+#include <userver/concurrent/variable.hpp>
+#include <userver/crypto/hash.hpp>
 #include <userver/crypto/signers.hpp>
 #include <userver/formats/json/serialize.hpp>
 #include <userver/formats/json/value.hpp>
@@ -15,6 +17,9 @@
 #include <userver/rcu/rcu.hpp>
 #include <userver/utils/periodic_task.hpp>
 #include <userver/yaml_config/merge_schemas.hpp>
+
+#include <chrono>
+#include <unordered_map>
 
 namespace apn {
 
@@ -29,6 +34,14 @@ constexpr userver::http::headers::PredefinedHeader kApnsId{"apns-id"};
 
 auto BaseUrl(bool use_sandbox) -> std::string_view {
     return use_sandbox ? kSandboxUrl : kProductionUrl;
+}
+
+// Stable cache key for the JWT a credential produces. The token depends only on
+// the auth key + key-id + team-id (not the topic or sandbox flag), so one token
+// serves both environments. Includes the key PEM so a rotated key gets a fresh
+// token; hashed, so no key material is retained.
+auto CredentialCacheKey(const Credentials& creds) -> std::string {
+    return userver::crypto::hash::Sha256(creds.key_id + '\n' + creds.team_id + '\n' + creds.key_pem);
 }
 
 auto ResolveBaseUrl(std::string_view host_override, bool use_sandbox) -> std::string {
@@ -129,6 +142,17 @@ struct Client::Impl {
     userver::rcu::Variable<std::string> token;
     userver::utils::PeriodicTask refresh_task;
 
+    // Per-credential JWT cache for the multi-tenant Send(creds, ...) path.
+    // Regenerating the provider JWT on every send wastes CPU and risks Apple's
+    // TooManyProviderTokenUpdates throttling; reuse each credential's token for
+    // token_refresh_interval (the same cadence as the default credential).
+    // Keyed by CredentialCacheKey.
+    struct CachedToken {
+        std::string token;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    mutable userver::concurrent::Variable<std::unordered_map<std::string, CachedToken>> token_cache;
+
     Impl(
         const userver::components::ComponentConfig& config,
         const userver::components::ComponentContext& context
@@ -188,15 +212,38 @@ struct Client::Impl {
     }
 
     auto Send(const Credentials& creds, const Notification& notification) const -> SendResult {
-        auto bearer = jwt::GenerateToken(creds.key_pem, creds.key_id, creds.team_id);
         return DoSend(
             http_client.GetHttpClient(),
             ResolveBaseUrl(host_override, creds.use_sandbox),
-            bearer,
+            TokenFor(creds),
             notification,
             creds.topic,
             request_timeout
         );
+    }
+
+    // Return a cached JWT for this credential, regenerating (and caching) it on
+    // a miss or once it ages past token_refresh_interval.
+    auto TokenFor(const Credentials& creds) const -> std::string {
+        const auto key = CredentialCacheKey(creds);
+        const auto now = std::chrono::steady_clock::now();
+        {
+            auto cache = token_cache.Lock();
+            auto it = cache->find(key);
+            if (it != cache->end() && now < it->second.deadline) {
+                return it->second.token;
+            }
+        }
+
+        auto bearer = jwt::GenerateToken(creds.key_pem, creds.key_id, creds.team_id);
+        const auto deadline = now + token_refresh_interval;
+        {
+            auto cache = token_cache.Lock();
+            // Drop expired entries so the map stays bounded by the live app set.
+            std::erase_if(*cache, [&](const auto& kv) { return now >= kv.second.deadline; });
+            (*cache)[key] = CachedToken{bearer, deadline};
+        }
+        return bearer;
     }
 };
 
